@@ -8,6 +8,8 @@ interface UploadModalProps {
   initialAlbumId?: string
   onClose: () => void
   onSuccess: () => void
+  pastedFiles?: File[]
+  onClearPastedFiles?: () => void
 }
 
 /**
@@ -19,7 +21,15 @@ interface UploadModalProps {
  * - Caption, date, and album selector fields
  * - Upload progress with success/error feedback
  */
-export const UploadModal: FC<UploadModalProps> = ({ isOpen, albums, initialAlbumId, onClose, onSuccess }) => {
+export const UploadModal: FC<UploadModalProps> = ({ 
+  isOpen, 
+  albums, 
+  initialAlbumId, 
+  onClose, 
+  onSuccess,
+  pastedFiles,
+  onClearPastedFiles
+}) => {
   const [files, setFiles] = useState<File[]>([])
   const [previews, setPreviews] = useState<string[]>([])
   const [caption, setCaption] = useState('')
@@ -98,6 +108,14 @@ export const UploadModal: FC<UploadModalProps> = ({ isOpen, albums, initialAlbum
     const newPreviews = validFiles.map(f => URL.createObjectURL(f))
     setPreviews(prev => [...prev, ...newPreviews])
   }
+
+  // Handle pasted files from clipboard
+  useEffect(() => {
+    if (isOpen && pastedFiles && pastedFiles.length > 0) {
+      handleFileSelect(pastedFiles)
+      onClearPastedFiles?.()
+    }
+  }, [isOpen, pastedFiles, onClearPastedFiles])
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
