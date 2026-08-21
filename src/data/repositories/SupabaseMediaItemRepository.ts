@@ -106,48 +106,96 @@ export class SupabaseMediaItemRepository implements MediaItemRepository {
   ): Promise<MediaItem> {
     if (!supabase) throw new Error("Supabase client is not initialized.");
 
-    // 1. Upload file to Supabase Storage ('media' bucket)
-    const fileExt = file.name.split('.').pop();
-    const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
-    const filePath = `uploads/${fileName}`;
+    let publicUrl = '';
 
-    // Upload with XHR to track progress
-    await new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', `${SUPABASE_URL}/storage/v1/object/media/${filePath}`, true);
-      xhr.setRequestHeader('Authorization', `Bearer ${SUPABASE_ANON_KEY}`);
-      xhr.setRequestHeader('apikey', SUPABASE_ANON_KEY);
-      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
-      
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable && onProgress) {
-          onProgress(e.loaded, e.total);
+    // 1. Try uploading to Cloudflare R2 via Supabase Edge Function
+    try {
+      const { data: edgeData, error: edgeError } = await supabase.functions.invoke(
+        'get-r2-upload-url',
+        {
+          body: {
+            fileName: file.name,
+            fileType: file.type || 'application/octet-stream',
+            fileSize: file.size,
+          },
         }
-      };
+      );
 
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(xhr.responseText);
-        } else {
-          try {
-            const errorObj = JSON.parse(xhr.responseText);
-            reject(new Error(`Upload failed: ${errorObj.message || xhr.responseText}`));
-          } catch {
-            reject(new Error(`Upload failed: ${xhr.responseText}`));
+      if (edgeError || !edgeData?.uploadUrl) {
+        throw new Error(edgeError?.message || edgeData?.error || 'Could not retrieve R2 Presigned URL');
+      }
+
+      const { uploadUrl, publicUrl: r2PublicUrl } = edgeData;
+
+      // Upload file directly to Cloudflare R2 using PUT
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', uploadUrl, true);
+        xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable && onProgress) {
+            onProgress(e.loaded, e.total);
           }
-        }
-      };
-      
-      xhr.onerror = () => reject(new Error('Network error during upload'));
-      xhr.send(file);
-    });
+        };
 
-    // Get public URL
-    const { data: publicUrlData } = supabase.storage
-      .from('media')
-      .getPublicUrl(filePath);
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve();
+          } else {
+            reject(new Error(`Upload to Cloudflare R2 failed with HTTP status ${xhr.status}`));
+          }
+        };
 
-    const publicUrl = publicUrlData.publicUrl;
+        xhr.onerror = () => reject(new Error('Network error during upload to Cloudflare R2'));
+        xhr.send(file);
+      });
+
+      publicUrl = r2PublicUrl;
+    } catch (r2Error: any) {
+      console.warn('Cloudflare R2 upload not available, falling back to Supabase Storage:', r2Error?.message || r2Error);
+
+      // Fallback: Upload to Supabase Storage ('media' bucket)
+      const fileExt = file.name.split('.').pop();
+      const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
+      const filePath = `uploads/${fileName}`;
+
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `${SUPABASE_URL}/storage/v1/object/media/${filePath}`, true);
+        xhr.setRequestHeader('Authorization', `Bearer ${SUPABASE_ANON_KEY}`);
+        xhr.setRequestHeader('apikey', SUPABASE_ANON_KEY);
+        xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+        
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable && onProgress) {
+            onProgress(e.loaded, e.total);
+          }
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(xhr.responseText);
+          } else {
+            try {
+              const errorObj = JSON.parse(xhr.responseText);
+              reject(new Error(`Upload failed: ${errorObj.message || xhr.responseText}`));
+            } catch {
+              reject(new Error(`Upload failed: ${xhr.responseText}`));
+            }
+          }
+        };
+        
+        xhr.onerror = () => reject(new Error('Network error during upload'));
+        xhr.send(file);
+      });
+
+      const { data: publicUrlData } = supabase.storage
+        .from('media')
+        .getPublicUrl(filePath);
+
+      publicUrl = publicUrlData.publicUrl;
+    }
 
     // Determine media type based on file type
     const isVideo = file.type.startsWith('video/');
